@@ -39,6 +39,9 @@ class Question(Base):
     image_refs_json = Column(Text)
     needs_correction = Column(Boolean, default=False)
     ocr_issues_json = Column(Text)
+    user_answer = Column(Text, nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    review_status = Column(String(10), nullable=True, default='待复习')
     created_at = Column(DateTime, default=datetime.utcnow)
 
     batch = relationship("UploadBatch", back_populates="questions")

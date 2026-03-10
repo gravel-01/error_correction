@@ -9,7 +9,7 @@ import re
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 
 logger = logging.getLogger(__name__)
@@ -337,3 +337,172 @@ def delete_question(db: Session, question_id: int) -> bool:
         raise
 
     return True
+
+
+def query_questions(
+    db: Session,
+    subject: Optional[str] = None,
+    knowledge_tag: Optional[str] = None,
+    question_type: Optional[str] = None,
+    keyword: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    review_status: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> Tuple[List[Question], int]:
+    """
+    统一查询题目（合并 get_history_questions 和 search_questions 的能力）
+
+    支持所有筛选条件任意组合。
+    """
+    query = db.query(Question).join(UploadBatch)
+
+    if subject:
+        query = query.filter(UploadBatch.subject == subject)
+
+    if question_type:
+        query = query.filter(Question.question_type == question_type)
+
+    if keyword:
+        escaped = re.sub(r"([%_\\])", r"\\\1", keyword)
+        query = query.filter(Question.content_json.ilike(f"%{escaped}%"))
+
+    if knowledge_tag:
+        query = query.join(QuestionTagMapping).join(KnowledgeTag).filter(
+            KnowledgeTag.tag_name == knowledge_tag
+        )
+
+    if start_date:
+        query = query.filter(Question.created_at >= start_date)
+    if end_date:
+        query = query.filter(Question.created_at <= end_date)
+
+    if review_status:
+        query = query.filter(Question.review_status == review_status)
+
+    total = query.distinct().count()
+
+    offset = (page - 1) * page_size
+    questions = (
+        query.distinct()
+        .options(joinedload(Question.batch), joinedload(Question.tags).joinedload(QuestionTagMapping.tag))
+        .order_by(Question.created_at.desc())
+        .offset(offset)
+        .limit(page_size)
+        .all()
+    )
+
+    return questions, total
+
+
+def update_user_answer(db: Session, question_id: int, user_answer: str) -> Optional[Question]:
+    """更新用户答案"""
+    question = db.query(Question).filter(Question.id == question_id).first()
+    if not question:
+        return None
+
+    try:
+        question.user_answer = user_answer
+        question.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(question)
+        return question
+    except Exception as e:
+        db.rollback()
+        logger.error(f"更新题目 {question_id} 答案失败: {e}")
+        raise
+
+
+def get_existing_question_types(db: Session) -> List[str]:
+    """获取数据库中已有的所有题型（去重）"""
+    rows = db.query(Question.question_type).distinct().filter(
+        Question.question_type.isnot(None),
+        Question.question_type != "",
+    ).all()
+    return [r[0] for r in rows]
+
+
+def get_questions_by_ids(db: Session, question_ids: List[int]) -> List[Question]:
+    """按 ID 列表批量查询题目"""
+    if not question_ids:
+        return []
+    return (
+        db.query(Question)
+        .options(joinedload(Question.batch), joinedload(Question.tags).joinedload(QuestionTagMapping.tag))
+        .filter(Question.id.in_(question_ids))
+        .all()
+    )
+
+
+VALID_REVIEW_STATUSES = ('待复习', '复习中', '已掌握')
+
+
+def update_review_status(db: Session, question_id: int, review_status: str) -> Optional[Question]:
+    """更新题目复习状态"""
+    if review_status not in VALID_REVIEW_STATUSES:
+        raise ValueError(f"无效的复习状态: {review_status}，可选值: {VALID_REVIEW_STATUSES}")
+
+    question = db.query(Question).filter(Question.id == question_id).first()
+    if not question:
+        return None
+
+    try:
+        question.review_status = review_status
+        question.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(question)
+        return question
+    except Exception as e:
+        db.rollback()
+        logger.error(f"更新题目 {question_id} 复习状态失败: {e}")
+        raise
+
+
+def get_review_status_stats(db: Session) -> Dict[str, int]:
+    """按复习状态分组统计数量"""
+    rows = db.query(
+        Question.review_status,
+        func.count(Question.id)
+    ).group_by(Question.review_status).all()
+
+    result = {'待复习': 0, '复习中': 0, '已掌握': 0}
+    for status, count in rows:
+        key = status or '待复习'
+        if key in result:
+            result[key] += count
+        else:
+            result['待复习'] += count
+    return result
+
+
+def get_daily_counts(db: Session, days: int = 7) -> List[Dict[str, Any]]:
+    """获取最近 N 天每日新增题目数"""
+    from datetime import timedelta
+    cutoff = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
+
+    # SQLite 兼容：使用 func.date() 提取日期字符串
+    date_expr = func.date(Question.created_at)
+    rows = db.query(
+        date_expr.label('date'),
+        func.count(Question.id).label('count')
+    ).filter(
+        Question.created_at >= cutoff
+    ).group_by(
+        date_expr
+    ).order_by(
+        date_expr
+    ).all()
+
+    # 构建日期→数量映射
+    date_map = {str(row.date): row.count for row in rows}
+
+    # 填充缺失的日期
+    result = []
+    for i in range(days):
+        d = cutoff + timedelta(days=i)
+        date_key = d.strftime('%Y-%m-%d')
+        date_str = d.strftime('%m-%d')
+        result.append({'date': date_str, 'count': date_map.get(date_key, 0)})
+
+    return result

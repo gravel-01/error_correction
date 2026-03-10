@@ -30,6 +30,13 @@ from db.crud import (
     get_questions_by_tag,
     get_all_tags,
     get_statistics,
+    query_questions,
+    update_user_answer,
+    get_existing_question_types,
+    get_questions_by_ids,
+    update_review_status,
+    get_review_status_stats,
+    get_daily_counts,
 )
 
 
@@ -317,3 +324,236 @@ class TestGetStatistics:
         assert stats["total_batches"] == 1
         assert stats["total_tags"] == 1
         assert stats["by_subject"]["高中数学"] == 2
+
+
+# ═══════════════════════════════════════════════════════════
+# query_questions
+# ═══════════════════════════════════════════════════════════
+
+
+class TestQueryQuestions:
+    """query_questions 统一查询测试"""
+
+    def _seed(self, db):
+        save_questions_to_db(
+            db,
+            [make_question("1", tags=["导数"]), make_question("2", text="物理题", qtype="填空题")],
+            {"original_filename": "a.pdf", "subject": "高中数学"},
+        )
+        save_questions_to_db(
+            db,
+            [make_question("3", text="电场强度", tags=["电场"])],
+            {"original_filename": "b.pdf", "subject": "高中物理"},
+        )
+
+    def test_no_filter(self, db):
+        self._seed(db)
+        qs, total = query_questions(db)
+        assert total == 3
+        assert len(qs) == 3
+
+    def test_filter_by_subject(self, db):
+        self._seed(db)
+        qs, total = query_questions(db, subject="高中物理")
+        assert total == 1
+        assert len(qs) == 1
+
+    def test_filter_by_keyword(self, db):
+        self._seed(db)
+        qs, total = query_questions(db, keyword="电场")
+        assert total == 1
+
+    def test_filter_by_question_type(self, db):
+        self._seed(db)
+        qs, total = query_questions(db, question_type="填空题")
+        assert total == 1
+
+    def test_combined_filters(self, db):
+        self._seed(db)
+        qs, total = query_questions(db, subject="高中数学", question_type="选择题")
+        assert total == 1
+
+    def test_pagination(self, db):
+        self._seed(db)
+        qs, total = query_questions(db, page=1, page_size=2)
+        assert total == 3
+        assert len(qs) == 2
+        qs2, _ = query_questions(db, page=2, page_size=2)
+        assert len(qs2) == 1
+
+
+# ═══════════════════════════════════════════════════════════
+# update_user_answer
+# ═══════════════════════════════════════════════════════════
+
+
+class TestUpdateUserAnswer:
+    """update_user_answer 测试"""
+
+    def test_update_answer(self, db):
+        save_questions_to_db(
+            db,
+            [make_question("1")],
+            {"original_filename": "a.pdf", "subject": "数学"},
+        )
+        from db.models import Question
+        q = db.query(Question).first()
+        result = update_user_answer(db, q.id, "答案是 A")
+        assert result is not None
+        assert result.user_answer == "答案是 A"
+        assert result.updated_at is not None
+
+    def test_nonexistent_question(self, db):
+        result = update_user_answer(db, 99999, "答案")
+        assert result is None
+
+
+# ═══════════════════════════════════════════════════════════
+# get_questions_by_ids
+# ═══════════════════════════════════════════════════════════
+
+
+class TestGetQuestionsByIds:
+    """get_questions_by_ids 测试"""
+
+    def test_get_by_ids(self, db):
+        save_questions_to_db(
+            db,
+            [make_question("1"), make_question("2", text="t2")],
+            {"original_filename": "a.pdf", "subject": "数学"},
+        )
+        from db.models import Question
+        all_qs = db.query(Question).all()
+        ids = [q.id for q in all_qs]
+        result = get_questions_by_ids(db, ids)
+        assert len(result) == 2
+
+    def test_empty_ids(self, db):
+        result = get_questions_by_ids(db, [])
+        assert result == []
+
+
+# ═══════════════════════════════════════════════════════════
+# update_review_status
+# ═══════════════════════════════════════════════════════════
+
+
+class TestUpdateReviewStatus:
+    """update_review_status 测试"""
+
+    def test_update_status(self, db):
+        save_questions_to_db(
+            db,
+            [make_question("1")],
+            {"original_filename": "a.pdf", "subject": "数学"},
+        )
+        from db.models import Question
+        q = db.query(Question).first()
+        result = update_review_status(db, q.id, "复习中")
+        assert result is not None
+        assert result.review_status == "复习中"
+        assert result.updated_at is not None
+
+    def test_update_to_mastered(self, db):
+        save_questions_to_db(
+            db,
+            [make_question("1")],
+            {"original_filename": "a.pdf", "subject": "数学"},
+        )
+        from db.models import Question
+        q = db.query(Question).first()
+        result = update_review_status(db, q.id, "已掌握")
+        assert result.review_status == "已掌握"
+
+    def test_invalid_status(self, db):
+        save_questions_to_db(
+            db,
+            [make_question("1")],
+            {"original_filename": "a.pdf", "subject": "数学"},
+        )
+        from db.models import Question
+        q = db.query(Question).first()
+        with pytest.raises(ValueError):
+            update_review_status(db, q.id, "无效状态")
+
+    def test_nonexistent_question(self, db):
+        result = update_review_status(db, 99999, "待复习")
+        assert result is None
+
+
+# ═══════════════════════════════════════════════════════════
+# get_review_status_stats
+# ═══════════════════════════════════════════════════════════
+
+
+class TestGetReviewStatusStats:
+    """get_review_status_stats 测试"""
+
+    def test_empty_db(self, db):
+        stats = get_review_status_stats(db)
+        assert stats == {'待复习': 0, '复习中': 0, '已掌握': 0}
+
+    def test_with_data(self, db):
+        save_questions_to_db(
+            db,
+            [make_question("1"), make_question("2", text="t2"), make_question("3", text="t3")],
+            {"original_filename": "a.pdf", "subject": "数学"},
+        )
+        from db.models import Question
+        qs = db.query(Question).all()
+        # 默认都是 '待复习' 或 None
+        update_review_status(db, qs[1].id, "复习中")
+        update_review_status(db, qs[2].id, "已掌握")
+
+        stats = get_review_status_stats(db)
+        assert stats['复习中'] == 1
+        assert stats['已掌握'] == 1
+
+
+# ═══════════════════════════════════════════════════════════
+# query_questions with review_status filter
+# ═══════════════════════════════════════════════════════════
+
+
+class TestQueryQuestionsReviewStatus:
+    """query_questions review_status 筛选测试"""
+
+    def test_filter_by_review_status(self, db):
+        save_questions_to_db(
+            db,
+            [make_question("1"), make_question("2", text="t2")],
+            {"original_filename": "a.pdf", "subject": "数学"},
+        )
+        from db.models import Question
+        qs = db.query(Question).all()
+        update_review_status(db, qs[0].id, "已掌握")
+
+        result, total = query_questions(db, review_status="已掌握")
+        assert total == 1
+        assert result[0].review_status == "已掌握"
+
+
+# ═══════════════════════════════════════════════════════════
+# get_daily_counts
+# ═══════════════════════════════════════════════════════════
+
+
+class TestGetDailyCounts:
+    """get_daily_counts 测试"""
+
+    def test_empty_db(self, db):
+        result = get_daily_counts(db, days=7)
+        assert len(result) == 7
+        assert all(d['count'] == 0 for d in result)
+
+    def test_with_data(self, db):
+        save_questions_to_db(
+            db,
+            [make_question("1")],
+            {"original_filename": "a.pdf", "subject": "数学"},
+        )
+        result = get_daily_counts(db, days=7)
+        assert len(result) == 7
+        # 今天应该有 1 条
+        total = sum(d['count'] for d in result)
+        assert total == 1
