@@ -72,3 +72,117 @@ export async function exportQuestions(selectedIds) {
   if (data && data.success) return data
   throw new Error((data && data.error) || '导出失败')
 }
+
+export async function saveToDb(selectedIds) {
+  const resp = await fetch('/api/save-to-db', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ selected_ids: selectedIds }),
+  })
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const data = await resp.json()
+  if (data && data.success) return data
+  throw new Error((data && data.error) || '导入错题库失败')
+}
+
+// ── 错题库 API ──────────────────────────────────────────
+
+export async function fetchErrorBank(params = {}) {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== null && v !== undefined && v !== '') qs.set(k, v)
+  }
+  const resp = await fetch(`/api/error-bank?${qs}`)
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const data = await resp.json()
+  if (data && data.success) return data
+  throw new Error((data && data.error) || '查询错题库失败')
+}
+
+export async function fetchSubjects() {
+  const resp = await fetch('/api/subjects')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const data = await resp.json()
+  if (data && data.success) return data.subjects
+  throw new Error((data && data.error) || '获取科目列表失败')
+}
+
+export async function fetchQuestionTypes() {
+  const resp = await fetch('/api/question-types')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const data = await resp.json()
+  if (data && data.success) return data.question_types
+  throw new Error((data && data.error) || '获取题型列表失败')
+}
+
+export async function fetchTagNames() {
+  const resp = await fetch('/api/stats')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const data = await resp.json()
+  if (data && data.success) return (data.stats || []).map(s => s.tag_name)
+  throw new Error((data && data.error) || '获取标签列表失败')
+}
+
+export async function saveAnswer(questionId, userAnswer) {
+  const resp = await fetch(`/api/question/${questionId}/answer`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_answer: userAnswer }),
+  })
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const data = await resp.json()
+  if (data && data.success) return data
+  throw new Error((data && data.error) || '保存答案失败')
+}
+
+export async function exportFromDb(selectedIds) {
+  const resp = await fetch('/api/export-from-db', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ selected_ids: selectedIds }),
+  })
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const data = await resp.json()
+  if (data && data.success) return data
+  throw new Error((data && data.error) || '导出失败')
+}
+
+export async function deleteQuestion(questionId) {
+  const resp = await fetch(`/api/question/${questionId}`, { method: 'DELETE' })
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const data = await resp.json()
+  if (data && data.success) return data
+  throw new Error((data && data.error) || '删除失败')
+}
+
+export async function updateReviewStatus(questionId, reviewStatus) {
+  const resp = await fetch(`/api/question/${questionId}/review-status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ review_status: reviewStatus }),
+  })
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const data = await resp.json()
+  if (data && data.success) return data
+  throw new Error((data && data.error) || '更新复习状态失败')
+}
+
+export async function fetchDashboardStats() {
+  const resp = await fetch('/api/dashboard-stats')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const data = await resp.json()
+  if (data && data.success) return data
+  throw new Error((data && data.error) || '获取统计数据失败')
+}
+
+export async function requestAiAnalysis(questionIds) {
+  const resp = await fetch('/api/ai-analysis', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question_ids: questionIds }),
+  })
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  const data = await resp.json()
+  if (data && data.success) return data
+  throw new Error((data && data.error) || 'AI 分析请求失败')
+}

@@ -12,9 +12,10 @@ import ImageModal from './components/ImageModal.vue'
 import ToastContainer from './components/ToastContainer.vue'
 import Dashboard from './components/Dashboard.vue'
 import CatLoading from './components/CatLoading.vue'
+import ErrorBank from './components/ErrorBank.vue'
 
 // ---- 视图路由控制 ----
-const currentView = ref('workspace') // 'workspace' | 'dashboard'
+const currentView = ref('workspace') // 'workspace' | 'dashboard' | 'error-bank'
 
 // ---- 主题 ----
 const theme = ref('light')
@@ -356,6 +357,16 @@ const doExport = async () => {
   }
 }
 
+const doSaveToDb = async () => {
+  if (!selectedIds.size) { pushToast('error', '请至少选择一道题目！'); return }
+  try {
+    const data = await api.saveToDb(Array.from(selectedIds))
+    pushToast('success', data.message || '已导入错题库')
+  } catch (e) {
+    pushToast('error', '导入失败: ' + (e instanceof Error ? e.message : String(e)))
+  }
+}
+
 const doReset = () => {
   uploadBusy.value = false
   uploadReady.value = false
@@ -425,6 +436,15 @@ onBeforeUnmount(() => {
             <i class="fa-solid fa-chart-pie w-5 text-center text-lg transition-transform group-hover:scale-110"></i>
             我的错题本
           </button>
+
+          <button
+            @click="currentView = 'error-bank'"
+            class="group flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-bold transition-all"
+            :class="currentView === 'error-bank' ? 'bg-blue-600 text-white shadow-md dark:bg-indigo-500 dark:shadow-[0_0_15px_rgba(99,102,241,0.3)]' : 'text-slate-600 hover:bg-slate-100 hover:text-blue-600 dark:text-slate-400 dark:hover:bg-white/5 dark:hover:text-indigo-300'"
+          >
+            <i class="fa-solid fa-database w-5 text-center text-lg transition-transform group-hover:scale-110"></i>
+            错题库
+          </button>
         </nav>
       </div>
 
@@ -459,6 +479,10 @@ onBeforeUnmount(() => {
         <button @click="currentView = 'dashboard'" class="flex flex-col items-center p-2 transition-colors" :class="currentView === 'dashboard' ? 'text-blue-600 dark:text-indigo-400' : 'text-slate-500 dark:text-slate-400'">
           <i class="fa-solid fa-chart-pie mb-1 text-xl"></i>
           <span class="text-[10px] font-bold">错题本</span>
+        </button>
+        <button @click="currentView = 'error-bank'" class="flex flex-col items-center p-2 transition-colors" :class="currentView === 'error-bank' ? 'text-blue-600 dark:text-indigo-400' : 'text-slate-500 dark:text-slate-400'">
+          <i class="fa-solid fa-database mb-1 text-xl"></i>
+          <span class="text-[10px] font-bold">错题库</span>
         </button>
         <button @click="(e) => toggleTheme(e.currentTarget)" class="flex flex-col items-center p-2 text-slate-500 transition-colors dark:text-slate-400">
           <i class="fa-solid mb-1 text-xl" :class="theme === 'dark' ? 'fa-sun text-amber-400' : 'fa-moon'"></i>
@@ -536,6 +560,7 @@ onBeforeUnmount(() => {
               :split-completed="splitCompleted"
               @split="doSplit"
               @export="doExport"
+              @save-to-db="doSaveToDb"
               @reset="doReset"
             />
 
@@ -550,8 +575,19 @@ onBeforeUnmount(() => {
         v-show="currentView === 'dashboard'"
         :theme="theme"
         :visible="currentView === 'dashboard'"
-        @toggle-theme="toggleTheme"
         @go-workspace="currentView = 'workspace'"
+        @push-toast="pushToast"
+        @open-image="openModal"
+      />
+
+      <!-- 视图 3：错题库 -->
+      <ErrorBank
+        v-show="currentView === 'error-bank'"
+        :theme="theme"
+        :visible="currentView === 'error-bank'"
+        @go-workspace="currentView = 'workspace'"
+        @push-toast="pushToast"
+        @open-image="openModal"
       />
     </main>
 

@@ -1,410 +1,399 @@
 <script setup>
-import { ref, onMounted, onUpdated, watch, nextTick, onBeforeUnmount } from 'vue'
+import { ref, reactive, watch, nextTick, onBeforeUnmount } from 'vue'
+import * as api from '../api.js'
+import QuestionDetailModal from './QuestionDetailModal.vue'
+import AiAnalysisModal from './AiAnalysisModal.vue'
 
 const props = defineProps({
   theme: { type: String, default: 'light' },
-  visible: { type: Boolean, default: false }
+  visible: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['toggle-theme', 'go-workspace'])
+const emit = defineEmits(['go-workspace', 'push-toast', 'open-image'])
 
-// ================== 图表逻辑 ==================
-const trendChartCanvas = ref(null)
-const causeChartCanvas = ref(null)
-let trendChartInstance = null
-let causeChartInstance = null
+// ---- 统计数据 ----
+const stats = ref(null)
+const statsLoading = ref(false)
 
-const initOrUpdateCharts = async () => {
-  await nextTick()
-  if (!window.Chart || !trendChartCanvas.value || !causeChartCanvas.value) return
+// ---- 待复习题目列表 ----
+const reviewItems = ref([])
+const reviewTotal = ref(0)
+const reviewLoading = ref(false)
 
-  const isDark = props.theme === 'dark'
-  const textColor = isDark ? 'rgba(255, 255, 255, 0.6)' : 'rgba(15, 23, 42, 0.6)'
-  const gridColor = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(15, 23, 42, 0.05)'
-  const tooltipBg = isDark ? 'rgba(15, 23, 42, 0.9)' : 'rgba(255, 255, 255, 0.9)'
-  const tooltipText = isDark ? '#fff' : '#0f172a'
+// ---- 详情弹窗 ----
+const detailOpen = ref(false)
+const detailQuestion = ref(null)
 
-  // 1. 趋势图
-  if (trendChartInstance) trendChartInstance.destroy()
-  trendChartInstance = new window.Chart(trendChartCanvas.value, {
-    type: 'line',
-    data: {
-      labels: ['周一', '周二', '周三', '周四', '周五', '周六', '周日'],
-      datasets: [
-        {
-          label: '新增录入',
-          data: [3, 5, 2, 8, 4, 12, 5],
-          borderColor: '#ef4444',
-          backgroundColor: 'rgba(239, 68, 68, 0.1)',
-          borderWidth: 2,
-          tension: 0.4,
-          fill: true,
-          pointBackgroundColor: '#ef4444'
-        },
-        {
-          label: '复习掌握',
-          data: [1, 2, 4, 3, 6, 8, 10],
-          borderColor: '#10b981',
-          backgroundColor: 'rgba(16, 185, 129, 0.1)',
-          borderWidth: 2,
-          tension: 0.4,
-          fill: true,
-          pointBackgroundColor: '#10b981'
-        }
-      ]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: {
-        legend: { labels: { color: textColor, usePointStyle: true, boxWidth: 6 }, position: 'top' },
-        tooltip: { backgroundColor: tooltipBg, titleColor: tooltipText, bodyColor: tooltipText, borderColor: gridColor, borderWidth: 1 }
-      },
-      scales: {
-        x: { grid: { display: false }, ticks: { color: textColor } },
-        y: { grid: { color: gridColor }, ticks: { color: textColor, stepSize: 4 } }
-      }
-    }
-  })
-
-  // 2. 环形图
-  if (causeChartInstance) causeChartInstance.destroy()
-  causeChartInstance = new window.Chart(causeChartCanvas.value, {
-    type: 'doughnut',
-    data: {
-      labels: ['概念不清', '粗心计算', '公式混淆', '未知错因'],
-      datasets: [{
-        data: [45, 25, 20, 10],
-        backgroundColor: ['#6366f1', '#f59e0b', '#ec4899', isDark ? '#334155' : '#cbd5e1'],
-        borderWidth: 0,
-        hoverOffset: 4
-      }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false, cutout: '75%',
-      plugins: {
-        legend: { position: 'right', labels: { color: textColor, usePointStyle: true, boxWidth: 8 } },
-        tooltip: { backgroundColor: tooltipBg, titleColor: tooltipText, bodyColor: tooltipText, borderColor: gridColor, borderWidth: 1 }
-      }
-    }
-  })
-}
-
-watch(() => props.theme, initOrUpdateCharts)
-watch(() => props.visible, (val) => {
-  if (val) {
-    nextTick(() => {
-      initOrUpdateCharts()
-      if (window.lucide) window.lucide.createIcons()
-    })
-  }
-})
-
-// ================== AI 分析弹窗与打字机动画逻辑 ==================
+// ---- AI 分析 ----
+const selectMode = ref(false)
+const selectedIds = reactive(new Set())
 const aiModalOpen = ref(false)
-const aiLoading = ref(false)
-const aiResultVisible = ref(false)
+const aiAnalysisResult = ref(null)
+const aiAnalyzing = ref(false)
 
-const typedText1 = ref('')
-const typedText3 = ref('')
-const showCursor1 = ref(false)
-const showCursor3 = ref(false)
-const stepVisibility = ref([false, false, false])
+// ---- 图表 ----
+const trendCanvas = ref(null)
+const tagCanvas = ref(null)
+let trendChart = null
+let tagChart = null
 
-let typingTimeout = null
-
-const fullText1 = "你错误地将周期的公式混淆了。正弦函数的周期公式是 T = 2π/ω，而不是 π/ω。你可能因为题目给了最小正周期为 π，直接导致计算时漏掉了系数 2。"
-const fullText3 = "建议复习《三角函数图像与性质》章节，重点巩固 T=2π/ω 的推导过程。我已经为你生成了 3 道只变动系数的同类题，点击下方按钮可以开始挑战。"
-
-const typeString = (fullStr, targetRef, cursorRef, callback) => {
-  let i = 0
-  cursorRef.value = true
-  const typeChar = () => {
-    if (i < fullStr.length) {
-      targetRef.value += fullStr.charAt(i)
-      i++
-      typingTimeout = setTimeout(typeChar, 25)
-    } else {
-      cursorRef.value = false
-      if (callback) callback()
-    }
+// ---- 数据加载 ----
+const loadStats = async () => {
+  statsLoading.value = true
+  try {
+    const data = await api.fetchDashboardStats()
+    stats.value = data
+  } catch (e) {
+    emit('push-toast', 'error', '加载统计数据失败')
+  } finally {
+    statsLoading.value = false
   }
-  typeChar()
 }
 
-const openAiAnalysisModal = () => {
-  // 重置状态
-  aiLoading.value = true
-  aiResultVisible.value = false
-  typedText1.value = ''
-  typedText3.value = ''
-  stepVisibility.value = [false, false, false]
-  aiModalOpen.value = true
+const loadReviewItems = async () => {
+  reviewLoading.value = true
+  try {
+    const data = await api.fetchErrorBank({ review_status: '待复习', page: 1, page_size: 10 })
+    reviewItems.value = data.items || []
+    reviewTotal.value = data.total || 0
+  } catch (e) {
+    emit('push-toast', 'error', '加载待复习题目失败')
+  } finally {
+    reviewLoading.value = false
+  }
+}
 
-  // 模拟加载 1.5s
-  setTimeout(() => {
-    aiLoading.value = false
-    aiResultVisible.value = true
-    
-    // 启动顺序动画
-    typeString(fullText1, typedText1, showCursor1, () => {
-      // 逐个显示步骤
-      stepVisibility.value.forEach((_, idx) => {
-        setTimeout(() => { stepVisibility.value[idx] = true }, idx * 400)
-      })
-      // 步骤显示完后显示总结
-      setTimeout(() => {
-        typeString(fullText3, typedText3, showCursor3, null)
-      }, stepVisibility.value.length * 400 + 200)
+const loadAll = () => { loadStats(); loadReviewItems() }
+
+// ---- 图表 ----
+const initCharts = async () => {
+  await nextTick()
+  if (!window.Chart || !stats.value) return
+  const isDark = props.theme === 'dark'
+  const textColor = isDark ? 'rgba(255,255,255,0.6)' : 'rgba(15,23,42,0.6)'
+  const gridColor = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(15,23,42,0.05)'
+
+  // 趋势图
+  if (trendCanvas.value) {
+    if (trendChart) trendChart.destroy()
+    const dc = stats.value.daily_counts || []
+    trendChart = new window.Chart(trendCanvas.value, {
+      type: 'line',
+      data: {
+        labels: dc.map(d => d.date),
+        datasets: [{
+          label: '每日新增',
+          data: dc.map(d => d.count),
+          borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,0.1)',
+          borderWidth: 2, tension: 0.4, fill: true,
+          pointBackgroundColor: '#3b82f6',
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: textColor, usePointStyle: true, boxWidth: 6 } } },
+        scales: {
+          x: { grid: { display: false }, ticks: { color: textColor } },
+          y: { grid: { color: gridColor }, ticks: { color: textColor, stepSize: 1 }, beginAtZero: true },
+        }
+      }
     })
-  }, 1500)
+  }
+
+  // 知识点环形图
+  if (tagCanvas.value) {
+    if (tagChart) tagChart.destroy()
+    const ts = stats.value.tag_stats || []
+    const colors = ['#6366f1', '#3b82f6', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#14b8a6', isDark ? '#334155' : '#cbd5e1']
+    tagChart = new window.Chart(tagCanvas.value, {
+      type: 'doughnut',
+      data: {
+        labels: ts.map(t => t.tag_name),
+        datasets: [{ data: ts.map(t => t.count), backgroundColor: colors.slice(0, ts.length), borderWidth: 0, hoverOffset: 4 }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, cutout: '70%',
+        plugins: { legend: { position: 'right', labels: { color: textColor, usePointStyle: true, boxWidth: 8 } } }
+      }
+    })
+  }
 }
 
-const closeAiAnalysisModal = () => {
-  clearTimeout(typingTimeout)
+// ---- 题目操作 ----
+const getSummary = (q) => {
+  const blocks = q.content_json || []
+  const texts = blocks.filter(b => b.block_type === 'text').map(b => b.content || '')
+  const joined = texts.join(' ').replace(/<[^>]+>/g, '')
+  return joined.length > 100 ? joined.slice(0, 100) + '...' : joined
+}
+
+const openDetail = (q) => { detailQuestion.value = q; detailOpen.value = true }
+const closeDetail = () => { detailOpen.value = false; detailQuestion.value = null }
+
+const quickMarkStatus = async (q, status) => {
+  try {
+    const data = await api.updateReviewStatus(q.id, status)
+    q.review_status = data.review_status
+    emit('push-toast', 'success', `已标记为「${status}」`)
+    if (status !== '待复习') {
+      reviewItems.value = reviewItems.value.filter(x => x.id !== q.id)
+      reviewTotal.value = Math.max(0, reviewTotal.value - 1)
+    }
+    loadStats()
+  } catch (e) {
+    emit('push-toast', 'error', '更新状态失败')
+  }
+}
+
+const onDeleted = (id) => {
+  reviewItems.value = reviewItems.value.filter(q => q.id !== id)
+  reviewTotal.value = Math.max(0, reviewTotal.value - 1)
+  closeDetail()
+  loadStats()
+}
+
+const onAnswerSaved = (id, answer, updatedAt) => {
+  const q = reviewItems.value.find(x => x.id === id)
+  if (q) { q.user_answer = answer; q.updated_at = updatedAt }
+}
+
+const onReviewStatusChanged = (id, status, updatedAt) => {
+  const q = reviewItems.value.find(x => x.id === id)
+  if (q) { q.review_status = status; q.updated_at = updatedAt }
+  if (status !== '待复习') {
+    reviewItems.value = reviewItems.value.filter(x => x.id !== id)
+    reviewTotal.value = Math.max(0, reviewTotal.value - 1)
+  }
+  loadStats()
+}
+
+// ---- AI 分析操作 ----
+const toggleSelectMode = () => {
+  selectMode.value = !selectMode.value
+  if (!selectMode.value) selectedIds.clear()
+}
+
+const toggleSelect = (id) => {
+  if (selectedIds.has(id)) selectedIds.delete(id)
+  else selectedIds.add(id)
+}
+
+const selectAllReview = () => {
+  for (const q of reviewItems.value) selectedIds.add(q.id)
+}
+
+const startAiAnalysis = async () => {
+  if (!selectedIds.size) {
+    emit('push-toast', 'error', '请先选择要分析的题目')
+    return
+  }
+  aiAnalyzing.value = true
+  aiModalOpen.value = true
+  aiAnalysisResult.value = null
+  try {
+    const data = await api.requestAiAnalysis(Array.from(selectedIds))
+    aiAnalysisResult.value = data.analysis
+  } catch (e) {
+    emit('push-toast', 'error', 'AI 分析失败: ' + (e instanceof Error ? e.message : String(e)))
+    aiModalOpen.value = false
+  } finally {
+    aiAnalyzing.value = false
+  }
+}
+
+const closeAiModal = () => {
   aiModalOpen.value = false
+  aiAnalysisResult.value = null
 }
 
-// 刷新 Lucide 图标和 MathJax
-onMounted(() => {
-  if (window.lucide) window.lucide.createIcons()
-  initOrUpdateCharts()
-  if (window.MathJax) window.MathJax.typesetPromise()
+// ---- 生命周期 ----
+watch(() => props.visible, (v) => {
+  if (v) { loadAll(); nextTick(initCharts) }
+}, { immediate: true })
+
+watch(() => [props.theme, stats.value], () => {
+  if (props.visible && stats.value) nextTick(initCharts)
 })
-onUpdated(() => {
-  if (window.lucide) window.lucide.createIcons()
-})
+
 onBeforeUnmount(() => {
-  clearTimeout(typingTimeout)
-  if (trendChartInstance) trendChartInstance.destroy()
-  if (causeChartInstance) causeChartInstance.destroy()
+  if (trendChart) trendChart.destroy()
+  if (tagChart) tagChart.destroy()
 })
 </script>
 
 <template>
-  <div class="relative min-h-screen text-slate-900 transition-colors duration-500 dark:text-slate-300">
-    <!-- 动态背景环境光 (组件内隔离) -->
-    <div class="pointer-events-none fixed inset-0 z-0 overflow-hidden">
-      <div class="absolute -right-[10%] top-[-10%] h-[50vw] w-[50vw] rounded-full bg-blue-300/20 mix-blend-multiply blur-[120px] transition-colors duration-1000 dark:bg-indigo-600/10 dark:mix-blend-screen"></div>
-      <div class="absolute -left-[10%] bottom-[-10%] h-[40vw] w-[40vw] rounded-full bg-cyan-200/30 mix-blend-multiply blur-[100px] transition-colors duration-1000 dark:bg-fuchsia-600/10 dark:mix-blend-screen"></div>
+  <div class="relative min-h-full">
+    <!-- 动态光晕 -->
+    <div class="pointer-events-none absolute inset-0 z-0 overflow-hidden">
+      <div class="absolute -top-[5%] right-[-5%] h-[45vw] w-[45vw] rounded-full bg-indigo-500/10 mix-blend-multiply blur-[120px] dark:bg-indigo-600/15 dark:mix-blend-screen"></div>
+      <div class="absolute -bottom-[10%] left-[-10%] h-[35vw] w-[35vw] rounded-full bg-cyan-400/10 mix-blend-multiply blur-[100px] dark:bg-cyan-600/10 dark:mix-blend-screen"></div>
     </div>
 
-    <!-- 导航栏 -->
-    <nav class="glass-panel fixed top-0 z-40 w-full transition-all duration-300">
-      <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-        <div class="flex h-16 items-center justify-between">
-          <div class="flex items-center gap-6">
-            <!-- 返回官网 -->
-            <a href="/" class="flex items-center gap-3 transition-opacity hover:opacity-80">
-              <div class="rounded-lg bg-blue-600 p-2 dark:bg-gradient-to-br dark:from-indigo-500 dark:to-purple-600">
-                <i data-lucide="book-open" class="h-5 w-5 text-white"></i>
-              </div>
-              <span class="tracking-wide text-xl font-bold text-slate-800 dark:text-slate-200">我的题库</span>
-            </a>
-            <div class="hidden items-center rounded-full border border-slate-300/50 bg-slate-200/50 px-4 py-1.5 md:flex dark:border-white/10 dark:bg-white/5">
-              <i data-lucide="search" class="mr-2 h-4 w-4 text-slate-400"></i>
-              <input type="text" placeholder="搜索知识点、题型..." class="w-48 border-none bg-transparent text-sm text-slate-700 outline-none placeholder:text-slate-400 dark:text-slate-300 dark:placeholder:text-slate-500">
-            </div>
+    <div class="container relative z-10 mx-auto max-w-6xl px-4 py-8 sm:px-8">
+      <!-- 页面标题 -->
+      <div class="mb-10 flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div class="mb-2 inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-bold text-indigo-600 dark:border-indigo-500/30 dark:bg-indigo-500/10 dark:text-indigo-300">
+            <i class="fa-solid fa-chart-pie animate-pulse"></i> 学习数据中心
           </div>
-          <div class="flex items-center gap-4">
-            <!-- 昼夜切换 -->
-            <button @click="(e) => emit('toggle-theme', e.currentTarget)" class="rounded-full p-2 text-slate-500 transition-colors hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-white/10">
-              <i data-lucide="sun" class="h-5 w-5" :class="theme === 'dark' ? 'hidden' : 'block'"></i>
-              <i data-lucide="moon" class="h-5 w-5" :class="theme === 'dark' ? 'block' : 'hidden'"></i>
-            </button>
-            <div class="h-8 w-8 cursor-pointer rounded-full border-2 border-white bg-gradient-to-r from-cyan-500 to-blue-500 shadow-sm dark:border-slate-800"></div>
+          <h2 class="text-3xl font-black tracking-tight text-slate-900 sm:text-4xl dark:text-white">我的错题本</h2>
+          <p class="mt-2 text-sm font-medium text-slate-500 dark:text-slate-400">
+            <i class="fa-solid fa-brain text-indigo-500"></i> 追踪复习进度，掌握薄弱环节
+          </p>
+        </div>
+        <button @click="emit('go-workspace')" class="btn-primary group h-12 px-8 shadow-xl shadow-blue-500/20">
+          <i class="fa-solid fa-plus-circle transition-transform group-hover:rotate-90"></i> 录入新题目
+        </button>
+      </div>
+
+      <!-- 统计卡片 -->
+      <div v-if="statsLoading" class="mb-8 flex justify-center py-12">
+        <div class="h-10 w-10 animate-spin rounded-full border-4 border-indigo-500/20 border-t-indigo-500"></div>
+      </div>
+      <div v-else class="mb-8 grid grid-cols-1 gap-5 sm:grid-cols-3">
+        <div class="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-[#0A0A0F]/60">
+          <div class="mb-2 flex items-center justify-between text-sm font-bold text-slate-500 dark:text-slate-400">
+            待复习 <i class="fa-solid fa-clock text-orange-500"></i>
+          </div>
+          <div class="text-3xl font-black text-slate-900 dark:text-white">
+            {{ stats?.review_stats?.['待复习'] || 0 }} <span class="ml-1 text-sm font-medium text-slate-400">道</span>
+          </div>
+        </div>
+        <div class="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-[#0A0A0F]/60">
+          <div class="mb-2 flex items-center justify-between text-sm font-bold text-slate-500 dark:text-slate-400">
+            复习中 <i class="fa-solid fa-spinner text-amber-500"></i>
+          </div>
+          <div class="text-3xl font-black text-slate-900 dark:text-white">
+            {{ stats?.review_stats?.['复习中'] || 0 }} <span class="ml-1 text-sm font-medium text-slate-400">道</span>
+          </div>
+        </div>
+        <div class="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-[#0A0A0F]/60">
+          <div class="mb-2 flex items-center justify-between text-sm font-bold text-slate-500 dark:text-slate-400">
+            已掌握 <i class="fa-solid fa-circle-check text-emerald-500"></i>
+          </div>
+          <div class="text-3xl font-black text-slate-900 dark:text-white">
+            {{ stats?.review_stats?.['已掌握'] || 0 }} <span class="ml-1 text-sm font-medium text-slate-400">道</span>
           </div>
         </div>
       </div>
-    </nav>
 
-    <!-- 主要内容区 -->
-    <main class="relative z-10 mx-auto flex max-w-7xl gap-8 px-4 pb-12 pt-24 sm:px-6 lg:px-8">
-      
-      <!-- 左侧边栏 -->
-      <aside class="hidden w-64 shrink-0 space-y-8 lg:block">
-        <div>
-          <!-- 切换回工作台的按钮 -->
-          <button @click="emit('go-workspace')" class="group relative mb-6 inline-flex h-12 w-full">
-            <div class="absolute -inset-px rounded-xl bg-gradient-to-r from-blue-500 to-indigo-500 opacity-0 blur-md transition-all duration-500 group-hover:opacity-100 dark:opacity-50"></div>
-            <span class="relative flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 font-bold text-white shadow-md transition-colors hover:bg-blue-700 dark:border dark:border-indigo-500/30 dark:bg-slate-900 dark:text-indigo-300 dark:shadow-none dark:hover:bg-slate-800">
-              <i data-lucide="plus" class="h-5 w-5"></i> 录入新错题
-            </span>
+      <!-- 图表区 -->
+      <div class="mb-8 grid grid-cols-1 gap-6 lg:grid-cols-3">
+        <div class="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-xl lg:col-span-2 dark:border-white/10 dark:bg-[#0A0A0F]/60">
+          <h3 class="mb-4 flex items-center gap-2 text-sm font-black text-slate-700 dark:text-slate-300">
+            <i class="fa-solid fa-chart-line text-blue-500"></i> 最近 7 天新增趋势
+          </h3>
+          <div class="relative h-[220px] w-full"><canvas ref="trendCanvas"></canvas></div>
+        </div>
+        <div class="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-[#0A0A0F]/60">
+          <h3 class="mb-4 flex items-center gap-2 text-sm font-black text-slate-700 dark:text-slate-300">
+            <i class="fa-solid fa-tags text-indigo-500"></i> 知识点分布
+          </h3>
+          <div v-if="stats?.tag_stats?.length" class="relative flex h-[220px] w-full justify-center"><canvas ref="tagCanvas"></canvas></div>
+          <div v-else class="flex h-[220px] items-center justify-center text-sm text-slate-400">暂无标签数据</div>
+        </div>
+      </div>
+
+      <!-- 待复习题目列表 -->
+      <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
+        <h3 class="flex items-center gap-2 text-lg font-black text-slate-900 dark:text-white">
+          <i class="fa-solid fa-clock text-orange-500"></i> 待复习题目
+          <span v-if="reviewTotal" class="ml-2 rounded-full bg-orange-100 px-2.5 py-0.5 text-xs font-bold text-orange-600 dark:bg-orange-500/10 dark:text-orange-400">{{ reviewTotal }}</span>
+        </h3>
+        <div v-if="reviewItems.length" class="flex items-center gap-2">
+          <button @click="toggleSelectMode"
+            class="rounded-lg border px-3 py-1.5 text-xs font-bold transition-all"
+            :class="selectMode ? 'border-blue-500 bg-blue-50 text-blue-600 dark:border-blue-400/30 dark:bg-blue-500/10 dark:text-blue-400' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-400'">
+            <i class="fa-solid mr-1" :class="selectMode ? 'fa-xmark' : 'fa-list-check'"></i>
+            {{ selectMode ? '取消选择' : '选择题目' }}
           </button>
-          
-          <h3 class="mb-4 px-2 text-xs font-bold uppercase tracking-wider text-slate-400">学科筛选</h3>
-          <ul class="space-y-1">
-            <li><a href="#" class="flex items-center justify-between rounded-lg bg-blue-50 px-3 py-2 font-medium text-blue-700 dark:bg-white/10 dark:text-white"><span class="flex items-center gap-2"><i data-lucide="function-square" class="h-4 w-4"></i> 数学</span> <span class="rounded-full bg-blue-200 px-2 py-0.5 text-xs text-blue-800 dark:bg-white/20 dark:text-slate-300">128</span></a></li>
-            <li><a href="#" class="flex items-center justify-between rounded-lg px-3 py-2 text-slate-600 transition-colors hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-white/5"><span class="flex items-center gap-2"><i data-lucide="atom" class="h-4 w-4"></i> 物理</span> <span class="rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-600 dark:bg-white/5 dark:text-slate-500">45</span></a></li>
-            <li><a href="#" class="flex items-center justify-between rounded-lg px-3 py-2 text-slate-600 transition-colors hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-white/5"><span class="flex items-center gap-2"><i data-lucide="flask-conical" class="h-4 w-4"></i> 化学</span> <span class="rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-600 dark:bg-white/5 dark:text-slate-500">32</span></a></li>
-          </ul>
-        </div>
-        
-        <div>
-          <h3 class="mb-4 px-2 text-xs font-bold uppercase tracking-wider text-slate-400">智能标签</h3>
-          <div class="flex flex-wrap gap-2 px-2">
-            <span class="cursor-pointer rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600 transition-colors hover:border-blue-400 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">解析几何</span>
-            <span class="cursor-pointer rounded-full border border-blue-300 bg-blue-50 px-3 py-1 text-xs text-blue-700 transition-colors dark:border-indigo-500/50 dark:bg-indigo-500/10 dark:text-indigo-300">三角函数</span>
-            <span class="cursor-pointer rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600 transition-colors hover:border-blue-400 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">粗心计算</span>
-          </div>
-        </div>
-      </aside>
-
-      <!-- 右侧：核心数据与列表区 -->
-      <div class="flex-1 space-y-6">
-        
-        <!-- 数据看板（示例数据） -->
-        <div class="mb-2 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-400">
-          <i data-lucide="info" class="h-3.5 w-3.5"></i>
-          以下为示例数据，真实数据功能即将上线（Coming Soon）
-        </div>
-        <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <div class="glass-panel rounded-2xl border border-slate-200 p-5 dark:border-white/5">
-            <div class="mb-1 flex items-center justify-between text-sm text-slate-500 dark:text-slate-400">待复习错题 <i data-lucide="clock-4" class="h-4 w-4 text-orange-500"></i></div>
-            <div class="text-3xl font-bold text-slate-800 dark:text-white">12 <span class="ml-1 text-sm font-normal text-slate-400">道</span></div>
-          </div>
-          <div class="glass-panel rounded-2xl border border-slate-200 p-5 dark:border-white/5">
-            <div class="mb-1 flex items-center justify-between text-sm text-slate-500 dark:text-slate-400">本周新增 <i data-lucide="trending-up" class="h-4 w-4 text-blue-500"></i></div>
-            <div class="text-3xl font-bold text-slate-800 dark:text-white">+8 <span class="ml-1 text-sm font-normal text-slate-400">道</span></div>
-          </div>
-          <div class="glass-panel rounded-2xl border border-slate-200 p-5 dark:border-white/5">
-            <div class="mb-1 flex items-center justify-between text-sm text-slate-500 dark:text-slate-400">已掌握移除 <i data-lucide="check-circle-2" class="h-4 w-4 text-emerald-500"></i></div>
-            <div class="text-3xl font-bold text-slate-800 dark:text-white">45 <span class="ml-1 text-sm font-normal text-slate-400">道</span></div>
-          </div>
-        </div>
-
-        <div class="mb-8 grid grid-cols-1 gap-6 lg:grid-cols-3">
-          <div class="glass-panel rounded-2xl border border-slate-200 p-5 lg:col-span-2 dark:border-white/5">
-            <div class="mb-4 flex items-center justify-between">
-              <h3 class="flex items-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-300"><i data-lucide="activity" class="h-4 w-4 text-indigo-500"></i> 错题攻克趋势</h3>
-            </div>
-            <div class="relative w-full h-[220px]"><canvas ref="trendChartCanvas"></canvas></div>
-          </div>
-          <div class="glass-panel rounded-2xl border border-slate-200 p-5 dark:border-white/5">
-            <div class="mb-4 flex items-center justify-between">
-              <h3 class="flex items-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-300"><i data-lucide="pie-chart" class="h-4 w-4 text-fuchsia-500"></i> 核心错因分布</h3>
-            </div>
-            <div class="relative flex w-full justify-center h-[220px]"><canvas ref="causeChartCanvas"></canvas></div>
-          </div>
-        </div>
-
-        <!-- 详细列表 -->
-        <div class="mt-8 flex items-center justify-between border-b border-slate-200 pb-4 dark:border-white/10">
-          <h2 class="text-xl font-bold text-slate-800 dark:text-slate-200">详细错题记录</h2>
-          <div class="flex gap-2">
-            <button class="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-600 transition-colors hover:bg-slate-50 dark:border-white/10 dark:bg-[#0A0A0F] dark:text-slate-300 dark:hover:bg-white/5">
-              <i data-lucide="download" class="h-4 w-4"></i> 导出重练卷
+          <template v-if="selectMode">
+            <button @click="selectAllReview" class="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600 transition-all hover:bg-slate-50 dark:border-white/10 dark:bg-white/5 dark:text-slate-400">
+              全选
             </button>
-          </div>
-        </div>
-
-        <!-- 卡片 1 -->
-        <div class="group rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition-all hover:shadow-md dark:border-white/10 dark:bg-[#0A0A0F] dark:hover:border-indigo-500/50">
-          <div class="mb-4 flex items-start justify-between">
-            <div class="flex gap-2">
-              <span class="rounded border border-blue-200 bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-700 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-400">数学</span>
-              <span class="rounded border border-indigo-200 bg-indigo-100 px-2.5 py-1 text-xs font-semibold text-indigo-700 dark:border-indigo-500/20 dark:bg-indigo-500/10 dark:text-indigo-400">三角函数</span>
-            </div>
-            <span class="flex items-center gap-1 text-xs text-slate-400"><i data-lucide="clock" class="h-3 w-3"></i> 2024-03-24</span>
-          </div>
-          
-          <div class="prose max-w-none mb-6 dark:prose-invert">
-            <p class="font-medium text-slate-800 dark:text-slate-200">12. 已知函数 $f(x) = \sin(\omega x + \frac{\pi}{6}) (\omega > 0)$ 的最小正周期为 $\pi$，则 $f(\frac{\pi}{4}) =$</p>
-            <div class="mt-2 space-y-1 pl-4 text-slate-600 dark:text-slate-400">
-              <p>A. $\frac{1}{2}$ &nbsp;&nbsp;&nbsp; B. $\frac{\sqrt{3}}{2}$ &nbsp;&nbsp;&nbsp; C. $-\frac{1}{2}$ &nbsp;&nbsp;&nbsp; D. $-\frac{\sqrt{3}}{2}$</p>
-            </div>
-          </div>
-
-          <div class="mb-6 flex gap-4 rounded-lg border border-red-100 bg-red-50 p-3 dark:border-red-500/10 dark:bg-red-500/5">
-            <div class="flex-1">
-              <span class="mb-1 block text-xs font-bold uppercase text-red-500">我的作答</span>
-              <p class="text-sm text-slate-700 dark:text-slate-300">选 A，代入公式算错了符号。</p>
-            </div>
-            <div class="flex-1 border-l border-red-200 pl-4 dark:border-red-500/20">
-              <span class="mb-1 block text-xs font-bold uppercase text-emerald-500">标准答案</span>
-              <p class="text-sm text-slate-700 dark:text-slate-300">选 B</p>
-            </div>
-          </div>
-
-          <div class="flex items-center justify-between border-t border-slate-100 pt-4 dark:border-white/5">
-            <button class="tooltip text-slate-500 transition-colors hover:text-red-500" title="标为未掌握"><i data-lucide="flag" class="h-5 w-5"></i></button>
-            <button @click="openAiAnalysisModal" class="flex transform items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-purple-600 px-5 py-2 text-sm font-bold text-white shadow-md shadow-indigo-500/25 transition-all hover:from-indigo-600 hover:to-purple-700 active:scale-95">
-              <i data-lucide="sparkles" class="h-4 w-4"></i> AI 深度错因分析
+            <button @click="startAiAnalysis" :disabled="!selectedIds.size || aiAnalyzing"
+              class="rounded-lg bg-gradient-to-r from-indigo-500 to-blue-600 px-4 py-1.5 text-xs font-bold text-white shadow-md shadow-indigo-500/20 transition-all hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed">
+              <i class="fa-solid fa-wand-magic-sparkles mr-1" :class="{ 'animate-spin': aiAnalyzing }"></i>
+              AI 错题分析 <span v-if="selectedIds.size">({{ selectedIds.size }})</span>
             </button>
+          </template>
+        </div>
+      </div>
+
+      <div v-if="reviewLoading" class="flex justify-center py-16">
+        <div class="h-12 w-12 animate-spin rounded-full border-4 border-blue-500/20 border-t-blue-500"></div>
+      </div>
+
+      <div v-else-if="!reviewItems.length" class="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50/50 py-20 dark:border-white/5 dark:bg-white/5">
+        <i class="fa-solid fa-circle-check mb-4 text-4xl text-emerald-400"></i>
+        <p class="text-lg font-black text-slate-900 dark:text-white">全部搞定了</p>
+        <p class="mt-1 text-sm text-slate-500">没有待复习的题目，继续保持</p>
+      </div>
+
+      <div v-else class="space-y-4">
+        <div v-for="q in reviewItems" :key="q.id"
+          @click="selectMode ? toggleSelect(q.id) : openDetail(q)"
+          class="group cursor-pointer rounded-2xl border border-slate-200/60 bg-white/80 p-5 shadow-sm backdrop-blur-md transition-all hover:-translate-y-0.5 hover:shadow-lg dark:border-white/10 dark:bg-[#0A0A0F]/60"
+          :class="{ 'ring-2 ring-indigo-500/50 border-indigo-300 dark:border-indigo-500/40': selectMode && selectedIds.has(q.id) }">
+          <div class="flex items-start gap-4">
+            <!-- 选择复选框 -->
+            <div v-if="selectMode" class="flex shrink-0 items-center pt-1" @click.stop="toggleSelect(q.id)">
+              <div class="flex h-5 w-5 items-center justify-center rounded-md border-2 transition-all"
+                :class="selectedIds.has(q.id) ? 'border-indigo-500 bg-indigo-500 text-white' : 'border-slate-300 dark:border-slate-600'">
+                <i v-if="selectedIds.has(q.id)" class="fa-solid fa-check text-[10px]"></i>
+              </div>
+            </div>
+            <div class="min-w-0 flex-1">
+              <div class="mb-3 flex flex-wrap items-center gap-2">
+                <span v-if="q.subject" class="rounded-lg bg-blue-50 px-2.5 py-1 text-[10px] font-black text-blue-600 dark:bg-blue-500/10 dark:text-blue-300">{{ q.subject }}</span>
+                <span class="rounded-lg bg-slate-100 px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-slate-500 dark:bg-white/5 dark:text-slate-400">{{ q.question_type }}</span>
+                <span v-for="tag in (q.knowledge_tags || []).slice(0, 3)" :key="tag" class="rounded-lg border border-indigo-500/20 bg-indigo-500/5 px-2 py-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-300">{{ tag }}</span>
+                <span class="ml-auto text-[10px] font-bold text-slate-400">{{ q.created_at ? new Date(q.created_at).toLocaleDateString() : '' }}</span>
+              </div>
+              <p class="line-clamp-2 text-sm font-bold leading-relaxed text-slate-700 group-hover:text-slate-900 dark:text-slate-300 dark:group-hover:text-white">{{ getSummary(q) }}</p>
+            </div>
+            <div class="flex shrink-0 gap-2" @click.stop>
+              <button @click="quickMarkStatus(q, '复习中')" class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-[10px] font-black text-amber-600 transition-all hover:bg-amber-100 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-400" title="标记为复习中">
+                <i class="fa-solid fa-spinner mr-1"></i>复习中
+              </button>
+              <button @click="quickMarkStatus(q, '已掌握')" class="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-[10px] font-black text-emerald-600 transition-all hover:bg-emerald-100 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-400" title="标记为已掌握">
+                <i class="fa-solid fa-circle-check mr-1"></i>已掌握
+              </button>
+            </div>
           </div>
         </div>
       </div>
-    </main>
+    </div>
+
+    <!-- 详情弹窗 -->
+    <QuestionDetailModal
+      :open="detailOpen"
+      :question="detailQuestion"
+      @close="closeDetail"
+      @open-image="(src) => emit('open-image', src)"
+      @deleted="onDeleted"
+      @answer-saved="onAnswerSaved"
+      @review-status-changed="onReviewStatusChanged"
+      @push-toast="(type, msg) => emit('push-toast', type, msg)"
+    />
 
     <!-- AI 分析弹窗 -->
-    <Teleport to="body">
-      <div v-if="aiModalOpen" class="fixed inset-0 z-[100] flex items-center justify-center p-4">
-        <div class="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity dark:bg-black/60" @click="closeAiAnalysisModal"></div>
-        <div class="relative flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl transition-all dark:border-indigo-500/30 dark:bg-[#0F111A]">
-          <!-- 头部 -->
-          <div class="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-6 py-4 dark:border-white/5 dark:bg-[#0A0A0F]">
-            <div class="flex items-center gap-2">
-              <div class="rounded-md bg-indigo-500 p-1.5"><i data-lucide="brain-circuit" class="h-4 w-4 text-white"></i></div>
-              <h3 class="font-bold text-slate-800 dark:text-slate-200">AI 智能分析报告</h3>
-            </div>
-            <button @click="closeAiAnalysisModal" class="text-slate-400 transition-colors hover:text-slate-600 dark:hover:text-white"><i data-lucide="x" class="h-5 w-5"></i></button>
-          </div>
-          
-          <div class="flex-1 overflow-y-auto p-6 text-sm text-slate-700 space-y-6 dark:text-slate-300">
-            <!-- Loading -->
-            <div v-if="aiLoading" class="flex flex-col items-center justify-center py-12">
-              <div class="relative mb-4 h-16 w-16">
-                <div class="absolute inset-0 rounded-full border-4 border-indigo-500/20"></div>
-                <div class="absolute inset-0 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent"></div>
-                <i data-lucide="sparkles" class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 transform text-indigo-500 h-6 w-6"></i>
-              </div>
-              <p class="animate-pulse font-mono text-indigo-600 dark:text-indigo-400">DeepSeek Agent 正在解析解题逻辑...</p>
-            </div>
-            
-            <!-- Result -->
-            <div v-if="aiResultVisible" class="space-y-6">
-              <div class="rounded-xl border border-red-100 bg-red-50 p-4 dark:border-red-500/20 dark:bg-red-500/5">
-                <h4 class="mb-2 flex items-center gap-2 font-bold text-red-600 dark:text-red-400"><i data-lucide="target" class="h-4 w-4"></i> 核心错因诊断</h4>
-                <p class="leading-relaxed">
-                  {{ typedText1 }}<span v-if="showCursor1" class="text-indigo-500 animate-pulse">▋</span>
-                </p>
-              </div>
-              <div>
-                <h4 class="mb-3 flex items-center gap-2 font-bold text-slate-800 dark:text-white"><i data-lucide="list-checks" class="h-4 w-4 text-indigo-500"></i> 正确解题路径</h4>
-                <div class="space-y-3 border-l-2 border-indigo-500/30 pl-4">
-                  <div v-if="stepVisibility[0]" class="transition-all duration-500"><span class="mr-2 rounded bg-indigo-100 px-1.5 text-xs text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400">Step 1</span>由周期公式 $T = \frac{2\pi}{\omega}$ 且 $T = \pi$。</div>
-                  <div v-if="stepVisibility[1]" class="mt-2 transition-all duration-500"><span class="mr-2 rounded bg-indigo-100 px-1.5 text-xs text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400">Step 2</span>解得 $\omega = 2$。函数为 $f(x) = \sin(2x + \frac{\pi}{6})$。</div>
-                  <div v-if="stepVisibility[2]" class="mt-2 transition-all duration-500"><span class="mr-2 rounded bg-indigo-100 px-1.5 text-xs text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400">Step 3</span>将 $x = \frac{\pi}{4}$ 代入得 $f(\frac{\pi}{4}) = \frac{\sqrt{3}}{2}$。</div>
-                </div>
-              </div>
-              <div class="rounded-xl border border-indigo-100 bg-indigo-50 p-4 dark:border-indigo-500/20 dark:bg-indigo-500/5">
-                <h4 class="mb-2 flex items-center gap-2 font-bold text-indigo-700 dark:text-indigo-300"><i data-lucide="lightbulb" class="h-4 w-4"></i> 举一反三建议</h4>
-                <p class="leading-relaxed">
-                  {{ typedText3 }}<span v-if="showCursor3" class="text-indigo-500 animate-pulse">▋</span>
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+    <AiAnalysisModal
+      :open="aiModalOpen"
+      :loading="aiAnalyzing"
+      :analysis="aiAnalysisResult"
+      @close="closeAiModal"
+    />
   </div>
 </template>
 
 <style scoped>
-.glass-panel {
-  background: rgba(255, 255, 255, 0.8);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(0, 0, 0, 0.05);
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+.container {
+  animation: dashEntry 0.8s cubic-bezier(0.2, 0, 0, 1) both;
 }
-.dark .glass-panel {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  box-shadow: none;
+@keyframes dashEntry {
+  from { opacity: 0; transform: scale(0.98) translateY(20px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
 }
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-.dark ::-webkit-scrollbar-thumb { background: #334155; }
 </style>
