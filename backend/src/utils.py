@@ -149,22 +149,6 @@ def export_wrongbook(
 
     console.print(f"[green]✓ 错题本已导出: {output_path}[/green]")
 
-    # 入库到数据库
-    if batch_info:
-        try:
-            from db import SessionLocal
-            from db.crud import save_questions_to_db
-
-            selected_questions = [q for q in questions if q.get('question_id') in selected_ids]
-            with SessionLocal() as db:
-                result = save_questions_to_db(db, selected_questions, batch_info)
-                console.print(
-                    f"[green]✓ 已入库 {result['created']} 道新题目"
-                    f"（跳过 {result['duplicates']} 道重复题目）[/green]"
-                )
-        except Exception as e:
-            console.print(f"[yellow]⚠ 入库失败: {e}[/yellow]")
-
     return output_path
 
 

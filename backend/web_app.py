@@ -108,6 +108,19 @@ def _serialize_question(q: Question) -> dict:
     }
 
 
+def _serialize_question_detail(q: Question) -> dict:
+    """将 Question ORM 对象序列化为详情 JSON（含科目、标签、答案等）"""
+    base = _serialize_question(q)
+    base['subject'] = q.batch.subject if q.batch else None
+    base['original_filename'] = q.batch.original_filename if q.batch else None
+    base['knowledge_tags'] = [m.tag.tag_name for m in (q.tags or []) if m.tag]
+    base['user_answer'] = q.user_answer
+    base['updated_at'] = q.updated_at.isoformat() if q.updated_at else None
+    base['review_status'] = q.review_status or '待复习'
+    base['image_refs_json'] = json.loads(q.image_refs_json) if q.image_refs_json else None
+    return base
+
+
 # ============================================================
 # 前端托管（生产模式：直接返回 Vite 构建产物）
 # ============================================================
@@ -398,7 +411,6 @@ def export_wrongbook():
 
         data = request.get_json(silent=True) or {}
         selected_ids = data.get('selected_ids', [])
-        subject = data.get('subject')  # 前端传入科目（可选）
 
         if not isinstance(selected_ids, list):
             return jsonify({
@@ -424,28 +436,9 @@ def export_wrongbook():
         with open(questions_file, 'r', encoding='utf-8') as f:
             questions = json.load(f)
 
-        # 如果前端未传入科目，从分割阶段保存的元数据中读取
-        if not subject:
-            meta_path = os.path.join(results_dir, "split_metadata.json")
-            if os.path.exists(meta_path):
-                with open(meta_path, 'r', encoding='utf-8') as f:
-                    meta = json.load(f)
-                subject = meta.get("subject")
-
-        # 构建批次信息用于入库
-        batch_info = {
-            "original_filename": ", ".join(
-                session_files.get(k, {}).get("filename", "未知")
-                for k in session_file_order
-            ),
-            "subject": subject,
-            "file_path": "",
-        }
-
         output_path = export_wrongbook_md(
             questions,
             selected_ids,
-            batch_info=batch_info
         )
 
         return jsonify({
@@ -770,11 +763,391 @@ def delete_question(question_id):
         return jsonify({'success': False, 'error': '删除失败，请稍后重试'}), 500
 
 
+# ============================================================
+# 错题库 API
+# ============================================================
+
+
+@app.route('/api/error-bank', methods=['GET'])
+def get_error_bank():
+    """
+    错题库统一查询
+
+    Query参数:
+        subject: 科目筛选
+        knowledge_tag: 知识点标签筛选
+        question_type: 题型筛选
+        keyword: 关键字搜索
+        start_date: 开始日期（YYYY-MM-DD）
+        end_date: 结束日期（YYYY-MM-DD）
+        page: 页码（默认1）
+        page_size: 每页数量（默认20）
+    """
+    try:
+        page = max(1, request.args.get('page', 1, type=int))
+        page_size = min(100, max(1, request.args.get('page_size', 20, type=int)))
+        subject = request.args.get('subject', type=str) or None
+        knowledge_tag = request.args.get('knowledge_tag', type=str) or None
+        question_type = request.args.get('question_type', type=str) or None
+        keyword = request.args.get('keyword', type=str) or None
+        review_status = request.args.get('review_status', type=str) or None
+        start_date_str = request.args.get('start_date')
+        end_date_str = request.args.get('end_date')
+
+        start_date = None
+        end_date = None
+        if start_date_str:
+            start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+        if end_date_str:
+            end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
+
+        with SessionLocal() as db:
+            questions, total = crud.query_questions(
+                db,
+                subject=subject,
+                knowledge_tag=knowledge_tag,
+                question_type=question_type,
+                keyword=keyword,
+                start_date=start_date,
+                end_date=end_date,
+                review_status=review_status,
+                page=page,
+                page_size=page_size,
+            )
+
+            total_pages = (total + page_size - 1) // page_size
+            items = [_serialize_question_detail(q) for q in questions]
+
+            return jsonify({
+                'success': True,
+                'items': items,
+                'total': total,
+                'page': page,
+                'page_size': page_size,
+                'total_pages': total_pages,
+            })
+
+    except ValueError:
+        return jsonify({'success': False, 'error': '日期格式错误，请使用 YYYY-MM-DD 格式'}), 400
+    except Exception as e:
+        logger.exception("查询错题库失败")
+        return jsonify({'success': False, 'error': '查询失败，请稍后重试'}), 500
+
+
+@app.route('/api/subjects', methods=['GET'])
+def get_subjects():
+    """获取所有科目列表"""
+    try:
+        with SessionLocal() as db:
+            subjects = crud.get_existing_subjects(db)
+            return jsonify({'success': True, 'subjects': subjects})
+    except Exception as e:
+        logger.exception("获取科目列表失败")
+        return jsonify({'success': False, 'error': '获取科目列表失败'}), 500
+
+
+@app.route('/api/question-types', methods=['GET'])
+def get_question_types():
+    """获取所有题型列表"""
+    try:
+        with SessionLocal() as db:
+            types = crud.get_existing_question_types(db)
+            return jsonify({'success': True, 'question_types': types})
+    except Exception as e:
+        logger.exception("获取题型列表失败")
+        return jsonify({'success': False, 'error': '获取题型列表失败'}), 500
+
+
+@app.route('/api/question/<int:question_id>/answer', methods=['PATCH'])
+def update_question_answer(question_id):
+    """保存用户答案"""
+    try:
+        data = request.get_json(silent=True) or {}
+        user_answer = data.get('user_answer')
+        if user_answer is None:
+            return jsonify({'success': False, 'error': '缺少 user_answer 字段'}), 400
+
+        with SessionLocal() as db:
+            question = crud.update_user_answer(db, question_id, user_answer)
+            if not question:
+                return jsonify({'success': False, 'error': '题目不存在'}), 404
+
+            return jsonify({
+                'success': True,
+                'message': '答案已保存',
+                'user_answer': question.user_answer,
+                'updated_at': question.updated_at.isoformat() if question.updated_at else None,
+            })
+
+    except Exception as e:
+        logger.exception("保存答案失败")
+        return jsonify({'success': False, 'error': '保存答案失败，请稍后重试'}), 500
+
+
+@app.route('/api/question/<int:question_id>/review-status', methods=['PATCH'])
+def update_question_review_status(question_id):
+    """更新题目复习状态"""
+    try:
+        data = request.get_json(silent=True) or {}
+        review_status = data.get('review_status')
+        if not review_status:
+            return jsonify({'success': False, 'error': '缺少 review_status 字段'}), 400
+
+        with SessionLocal() as db:
+            question = crud.update_review_status(db, question_id, review_status)
+            if not question:
+                return jsonify({'success': False, 'error': '题目不存在'}), 404
+
+            return jsonify({
+                'success': True,
+                'message': '复习状态已更新',
+                'review_status': question.review_status,
+                'updated_at': question.updated_at.isoformat() if question.updated_at else None,
+            })
+
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.exception("更新复习状态失败")
+        return jsonify({'success': False, 'error': '更新复习状态失败，请稍后重试'}), 500
+
+
+@app.route('/api/dashboard-stats', methods=['GET'])
+def get_dashboard_stats():
+    """获取 Dashboard 所需的完整统计数据"""
+    try:
+        with SessionLocal() as db:
+            # 复习状态统计
+            review_stats = crud.get_review_status_stats(db)
+
+            # 总体统计
+            statistics = crud.get_statistics(db)
+
+            # 知识点标签统计 top 8
+            tag_stats = crud.get_knowledge_stats(db)[:8]
+
+            # 最近7天每日新增
+            daily_counts = crud.get_daily_counts(db, days=7)
+
+            return jsonify({
+                'success': True,
+                'review_stats': review_stats,
+                'total_questions': statistics['total_questions'],
+                'by_subject': statistics['by_subject'],
+                'tag_stats': tag_stats,
+                'daily_counts': daily_counts,
+            })
+
+    except Exception as e:
+        logger.exception("获取 Dashboard 统计失败")
+        return jsonify({'success': False, 'error': '获取统计失败，请稍后重试'}), 500
+
+
+@app.route('/api/save-to-db', methods=['POST'])
+def save_to_db():
+    """
+    将分割好的题目导入错题库（仅入库，不导出 Markdown）
+
+    Request Body:
+        {
+            "selected_ids": ["q_0", "q_1", ...]   # 选中的题目 ID 列表
+        }
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        selected_ids = data.get('selected_ids', [])
+
+        if not isinstance(selected_ids, list) or not selected_ids:
+            return jsonify({'success': False, 'error': '请选择至少一道题目'}), 400
+
+        results_dir = RESULTS_DIR
+        questions_file = os.path.join(results_dir, "questions.json")
+        if not os.path.exists(questions_file):
+            return jsonify({'success': False, 'error': '请先分割题目'}), 400
+
+        with open(questions_file, 'r', encoding='utf-8') as f:
+            questions = json.load(f)
+
+        selected_questions = [q for q in questions if q.get('question_id') in selected_ids]
+        if not selected_questions:
+            return jsonify({'success': False, 'error': '未找到选中的题目'}), 400
+
+        # 读取科目信息
+        subject = None
+        meta_path = os.path.join(results_dir, "split_metadata.json")
+        if os.path.exists(meta_path):
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                meta = json.load(f)
+            subject = meta.get("subject")
+
+        batch_info = {
+            "original_filename": ", ".join(
+                session_files.get(k, {}).get("filename", "未知")
+                for k in session_file_order
+            ),
+            "subject": subject,
+            "file_path": "",
+        }
+
+        with SessionLocal() as db:
+            result = crud.save_questions_to_db(db, selected_questions, batch_info)
+
+        return jsonify({
+            'success': True,
+            'message': f'已导入 {result["created"]} 道题目（跳过 {result["duplicates"]} 道重复）',
+            'created': result['created'],
+            'duplicates': result['duplicates'],
+        })
+
+    except Exception as e:
+        logger.exception("导入错题库失败")
+        return jsonify({'success': False, 'error': '导入错题库失败，请稍后重试'}), 500
+
+
+@app.route('/api/ai-analysis', methods=['POST'])
+def ai_analysis():
+    """
+    AI 错题分析（骨架路由）
+
+    接收一组题目 ID，调用 AI 对这些错题进行综合分析，返回：
+    - 薄弱知识点诊断
+    - 错因归纳
+    - 针对性复习建议
+
+    Request Body:
+        {
+            "question_ids": [1, 2, 3]   # 必填，至少 1 道，最多 20 道
+        }
+
+    Response:
+        {
+            "success": true,
+            "analysis": {
+                "summary": "综合诊断摘要",
+                "weak_points": ["知识点A", "知识点B"],
+                "error_patterns": [
+                    {"pattern": "错因类型", "description": "详细描述", "question_ids": [1, 2]}
+                ],
+                "suggestions": ["建议1", "建议2"],
+                "per_question": [
+                    {"question_id": 1, "diagnosis": "该题错因分析", "hint": "解题提示"}
+                ]
+            }
+        }
+
+    TODO（后端开发者）:
+        1. 从数据库查询题目详情（content_json, options_json, user_answer, knowledge_tags）
+        2. 构建 prompt，将题目内容 + 用户答案 + 知识点标签传给 LLM
+        3. 调用 LLM（建议使用 llm.py 中的 init_model，支持 deepseek/ernie）
+        4. 解析 LLM 返回的结构化结果，填充 analysis 字段
+        5. 可选：将分析结果缓存到数据库，避免重复分析
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        question_ids = data.get('question_ids', [])
+
+        if not isinstance(question_ids, list) or not question_ids:
+            return jsonify({'success': False, 'error': '请选择至少一道题目'}), 400
+
+        if len(question_ids) > 20:
+            return jsonify({'success': False, 'error': '单次最多分析 20 道题目'}), 400
+
+        with SessionLocal() as db:
+            questions = crud.get_questions_by_ids(db, question_ids)
+            if not questions:
+                return jsonify({'success': False, 'error': '未找到对应题目'}), 404
+
+            # ── TODO: 替换为真实 AI 分析逻辑 ──────────────────
+            # 当前返回占位数据，供前端联调使用
+            knowledge_tags = set()
+            per_question = []
+            for q in questions:
+                tags = [m.tag.tag_name for m in (q.tags or []) if m.tag]
+                knowledge_tags.update(tags)
+                per_question.append({
+                    'question_id': q.id,
+                    'diagnosis': f'题目 #{q.id} 的错因分析（待 AI 生成）',
+                    'hint': f'题目 #{q.id} 的解题提示（待 AI 生成）',
+                })
+
+            analysis = {
+                'summary': f'已选择 {len(questions)} 道题目进行分析（AI 分析功能待接入）',
+                'weak_points': list(knowledge_tags) or ['暂无知识点数据'],
+                'error_patterns': [
+                    {
+                        'pattern': '待 AI 识别',
+                        'description': '错因模式将由 AI 自动归纳',
+                        'question_ids': [q.id for q in questions],
+                    }
+                ],
+                'suggestions': [
+                    '建议回顾相关知识点章节',
+                    '建议针对薄弱环节进行专项练习',
+                ],
+                'per_question': per_question,
+            }
+            # ── END TODO ──────────────────────────────────────
+
+            return jsonify({
+                'success': True,
+                'analysis': analysis,
+            })
+
+    except Exception as e:
+        logger.exception("AI 分析失败")
+        return jsonify({'success': False, 'error': 'AI 分析失败，请稍后重试'}), 500
+
+
+@app.route('/api/export-from-db', methods=['POST'])
+def export_from_db():
+    """从数据库按 ID 列表导出 Markdown 错题本"""
+    try:
+        data = request.get_json(silent=True) or {}
+        selected_ids = data.get('selected_ids', [])
+
+        if not isinstance(selected_ids, list) or not selected_ids:
+            return jsonify({'success': False, 'error': '请选择至少一道题目'}), 400
+
+        with SessionLocal() as db:
+            questions_orm = crud.get_questions_by_ids(db, selected_ids)
+            if not questions_orm:
+                return jsonify({'success': False, 'error': '未找到对应题目'}), 404
+
+            # 转换为 export_wrongbook_md 所需的 dict 格式
+            questions = []
+            for q in questions_orm:
+                questions.append({
+                    'question_id': str(q.id),
+                    'question_type': q.question_type,
+                    'content_blocks': json.loads(q.content_json) if q.content_json else [],
+                    'options': json.loads(q.options_json) if q.options_json else None,
+                    'has_formula': q.has_formula,
+                    'has_image': q.has_image,
+                    'knowledge_tags': [m.tag.tag_name for m in (q.tags or []) if m.tag],
+                })
+
+            str_ids = [str(qid) for qid in selected_ids]
+            output_path = export_wrongbook_md(questions, str_ids)
+
+        return jsonify({
+            'success': True,
+            'message': '错题本导出成功',
+            'output_path': output_path,
+        })
+
+    except Exception as e:
+        logger.exception("从数据库导出失败")
+        return jsonify({'success': False, 'error': '导出失败，请稍后重试'}), 500
+
+
 if __name__ == '__main__':
     # 确保运行时目录存在
     ensure_dirs()
     # 初始化数据库
     init_db()
+    # 自动迁移（添加新列等）
+    from db.migrate import migrate
+    migrate()
     print("[数据库] 初始化完成")
 
     print("=" * 60)
@@ -785,5 +1158,5 @@ if __name__ == '__main__':
 
     app.run(
         host='0.0.0.0', port=5001, debug=True,
-        exclude_patterns=["*/site-packages/*"],
+        exclude_patterns=["*site-packages*"],
     )
